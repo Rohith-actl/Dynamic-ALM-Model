@@ -1,6 +1,8 @@
 # Dynamic-ALM-Model
 This project implements a multi-year stochastic Asset–Liability Management (ALM) framework in R to project assets, liabilities, surplus, and solvency metrics under uncertainty.
+
 ***Note: use "knit with parameters" to modify inputs.
+
 The model integrates:
 
 Stochastic asset returns (equities, bonds, cash)
