@@ -1,0 +1,1385 @@
+---
+title: "Dynamic ALM Model - Multi-Year Stochastic Projection"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: hide
+    fig_width: 10
+    fig_height: 6
+params:
+  n_simulations: 10000
+  n_years: 15
+  equity_initial: 2000
+  bonds_initial: 2500
+  alternatives_initial: 800
+  cash_initial: 700
+  equity_return: 0.08
+  bonds_return: 0.04
+  alternatives_return: 0.06
+  cash_return: 0.03
+  equity_vol: 0.18
+  bonds_vol: 0.06
+  alternatives_vol: 0.12
+  cash_vol: 0.005
+  equity_yield: 0.02
+  bonds_yield: 0.035
+  alternatives_yield: 0.04
+  cash_yield: 0.03
+  target_equity: 0.35
+  target_bonds: 0.45
+  target_alternatives: 0.12
+  target_cash: 0.08
+  rebalance_freq: 1
+  rebalance_threshold: 0.05
+  existing_reserves: 4200
+  new_business_pv: 500
+  claims_lambda: 850
+  claims_severity_mean: 4.8
+  claims_severity_sd: 1.2
+  claims_trend: 0.015
+  claims_volatility: 0.08
+  reserve_dev_years: 10
+  reserve_initial_paid: 0.30
+  reserve_ultimate_paid: 0.98
+  reserve_volatility: 0.12
+  nb_annual_premium: 450
+  nb_growth_rate: 0.03
+  nb_loss_ratio: 0.65
+  nb_expense_ratio: 0.28
+  nb_lapse_rate: 0.08
+  expense_annual_fixed: 180
+  expense_variable_rate: 0.05
+  expense_inflation_sens: 1.2
+  ir_r0: 0.03
+  ir_theta: 0.04
+  ir_kappa: 0.3
+  ir_sigma: 0.015
+  scenario_market_crash_equity: -0.35
+  scenario_market_crash_rate: -0.02
+  scenario_market_crash_claims: 1.0
+  scenario_market_crash_inflation: 0
+  scenario_rate_spike_equity: -0.15
+  scenario_rate_spike_rate: 0.03
+  scenario_rate_spike_claims: 1.0
+  scenario_rate_spike_inflation: 0.01
+  scenario_catastrophe_equity: 0
+  scenario_catastrophe_rate: 0
+  scenario_catastrophe_claims: 2.5
+  scenario_catastrophe_inflation: 0
+  scenario_inflation_equity: -0.10
+  scenario_inflation_rate: 0.025
+  scenario_inflation_claims: 1.2
+  scenario_inflation_inflation: 0.03
+  scenario_pandemic_equity: -0.25
+  scenario_pandemic_rate: -0.015
+  scenario_pandemic_claims: 1.4
+  scenario_pandemic_inflation: 0.005
+  use_ai_insights: TRUE
+  ollama_model: "llama3.2"
+  ollama_url: "http://localhost:11434/api/generate"
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, 
+                      fig.align = 'center', cache = FALSE)
+set.seed(42)
+```
+
+<style>
+.disclaimer {
+  background-color: #fff3cd;
+  border-left: 5px solid #ffc107;
+  padding: 15px;
+  margin: 20px 0;
+}
+.executive-summary {
+  background-color: #d1ecf1;
+  border-left: 5px solid #0c5460;
+  padding: 15px;
+  margin: 20px 0;
+}
+.risk-high {
+  color: #dc3545;
+  font-weight: bold;
+}
+.risk-medium {
+  color: #ffc107;
+  font-weight: bold;
+}
+.risk-low {
+  color: #28a745;
+  font-weight: bold;
+}
+.user-input {
+  background-color: #e7f3ff;
+  border-left: 5px solid #2196F3;
+  padding: 15px;
+  margin: 20px 0;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+.ai-output {
+  background-color: #f0f4ff;
+  border-left: 5px solid #4a90e2;
+  padding: 20px;
+  margin: 20px 0;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  line-height: 1.6;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  white-space: pre-wrap;
+}
+.ai-output p {
+  margin: 10px 0;
+}
+</style>
+```{r libraries, include=FALSE}
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(plotly)
+  library(knitr)
+  library(kableExtra)
+  library(MASS)
+  library(parallel)
+  library(gridExtra)
+  library(scales)
+  library(viridis)
+  library(httr)
+  library(jsonlite)
+})
+```
+```{r user_inputs, include=FALSE}
+# Extract parameters
+n_simulations <- params$n_simulations
+n_years <- params$n_years
+
+# Asset parameters
+initial_assets <- list(
+  equities = params$equity_initial,
+  bonds = params$bonds_initial,
+  alternatives = params$alternatives_initial,
+  cash = params$cash_initial
+)
+
+expected_returns <- list(
+  equities = params$equity_return,
+  bonds = params$bonds_return,
+  alternatives = params$alternatives_return,
+  cash = params$cash_return
+)
+
+volatilities <- list(
+  equities = params$equity_vol,
+  bonds = params$bonds_vol,
+  alternatives = params$alternatives_vol,
+  cash = params$cash_vol
+)
+
+yields <- list(
+  equities = params$equity_yield,
+  bonds = params$bonds_yield,
+  alternatives = params$alternatives_yield,
+  cash = params$cash_yield
+)
+
+target_allocation <- c(
+  equities = params$target_equity,
+  bonds = params$target_bonds,
+  alternatives = params$target_alternatives,
+  cash = params$target_cash
+)
+
+rebalance_frequency <- params$rebalance_freq
+rebalance_threshold <- params$rebalance_threshold
+
+# Asset correlation matrix
+asset_correlation <- matrix(c(
+  1.00,  -0.30,  0.50,  0.05,
+  -0.30,  1.00, -0.10,  0.20,
+  0.50,  -0.10,  1.00,  0.10,
+  0.05,   0.20,  0.10,  1.00
+), nrow = 4, byrow = TRUE)
+
+colnames(asset_correlation) <- rownames(asset_correlation) <- 
+  c("equities", "bonds", "alternatives", "cash")
+
+# Liability parameters
+initial_liabilities <- list(
+  existing_reserves = params$existing_reserves,
+  new_business_pv = params$new_business_pv
+)
+
+claims_params <- list(
+  frequency_lambda = params$claims_lambda,
+  severity_mean = params$claims_severity_mean,
+  severity_sd = params$claims_severity_sd,
+  trend = params$claims_trend,
+  volatility = params$claims_volatility
+)
+
+reserve_params <- list(
+  development_years = params$reserve_dev_years,
+  initial_paid_ratio = params$reserve_initial_paid,
+  ultimate_paid_ratio = params$reserve_ultimate_paid,
+  volatility = params$reserve_volatility
+)
+
+new_business_params <- list(
+  annual_premium = params$nb_annual_premium,
+  growth_rate = params$nb_growth_rate,
+  loss_ratio = params$nb_loss_ratio,
+  expense_ratio = params$nb_expense_ratio,
+  lapse_rate = params$nb_lapse_rate
+)
+
+expense_params <- list(
+  annual_fixed = params$expense_annual_fixed,
+  variable_rate = params$expense_variable_rate,
+  inflation_sensitivity = params$expense_inflation_sens
+)
+
+# Interest rate model
+interest_rate_params <- list(
+  r0 = params$ir_r0,
+  theta = params$ir_theta,
+  kappa = params$ir_kappa,
+  sigma = params$ir_sigma
+)
+
+# Risk metrics
+var_levels <- c(0.950, 0.975, 0.990, 0.995)
+tvar_levels <- c(0.975, 0.990, 0.995)
+
+# Scenarios
+scenarios <- list(
+  base = list(
+    name = "Base Case", 
+    equity_shock = 0,
+    rate_shock = 0,
+    claims_shock = 1.0,
+    inflation_shock = 0
+  ),
+  
+  market_crash = list(
+    name = "Market Crash", 
+    equity_shock = params$scenario_market_crash_equity,
+    rate_shock = params$scenario_market_crash_rate,
+    claims_shock = params$scenario_market_crash_claims,
+    inflation_shock = params$scenario_market_crash_inflation
+  ),
+  
+  rate_spike = list(
+    name = "Interest Rate Spike", 
+    equity_shock = params$scenario_rate_spike_equity,
+    rate_shock = params$scenario_rate_spike_rate,
+    claims_shock = params$scenario_rate_spike_claims,
+    inflation_shock = params$scenario_rate_spike_inflation
+  ),
+  
+  catastrophe = list(
+    name = "Catastrophe Year", 
+    equity_shock = params$scenario_catastrophe_equity,
+    rate_shock = params$scenario_catastrophe_rate,
+    claims_shock = params$scenario_catastrophe_claims,
+    inflation_shock = params$scenario_catastrophe_inflation
+  ),
+  
+  inflation_surge = list(
+    name = "Inflation Surge", 
+    equity_shock = params$scenario_inflation_equity,
+    rate_shock = params$scenario_inflation_rate,
+    claims_shock = params$scenario_inflation_claims,
+    inflation_shock = params$scenario_inflation_inflation
+  ),
+  
+  pandemic = list(
+    name = "Pandemic", 
+    equity_shock = params$scenario_pandemic_equity,
+    rate_shock = params$scenario_pandemic_rate,
+    claims_shock = params$scenario_pandemic_claims,
+    inflation_shock = params$scenario_pandemic_inflation
+  )
+)
+
+# AI configuration
+use_ai_insights <- params$use_ai_insights
+ollama_model <- params$ollama_model
+ollama_url <- params$ollama_url
+```
+```{r core_functions, include=FALSE}
+# Core functions
+generate_correlated_returns <- function(n, means, sds, corr_matrix) {
+  chol_matrix <- chol(corr_matrix)
+  z <- matrix(rnorm(n * length(means)), nrow = n, ncol = length(means))
+  correlated_z <- z %*% chol_matrix
+  returns <- sweep(correlated_z, 2, sds, "*")
+  returns <- sweep(returns, 2, means, "+")
+  return(returns)
+}
+
+simulate_interest_rates <- function(n_periods, r0, theta, kappa, sigma, dt = 1) {
+  rates <- numeric(n_periods)
+  rates[1] <- r0
+  for (t in 2:n_periods) {
+    dW <- rnorm(1, mean = 0, sd = sqrt(dt))
+    dr <- kappa * (theta - rates[t-1]) * dt + sigma * dW
+    rates[t] <- max(rates[t-1] + dr, 0.001)
+  }
+  return(rates)
+}
+
+simulate_claims <- function(n_years, lambda, severity_mean, severity_sd, trend, volatility) {
+  claims <- numeric(n_years)
+  for (t in 1:n_years) {
+    adjusted_lambda <- lambda * (1 + trend)^(t-1)
+    adjusted_mean <- severity_mean * (1 + trend)^(t-1)
+    vol_shock <- rnorm(1, mean = 0, sd = volatility)
+    adjusted_lambda <- adjusted_lambda * (1 + vol_shock)
+    n_claims <- rpois(1, lambda = adjusted_lambda)
+    if (n_claims > 0) {
+      claim_sizes <- rlnorm(n_claims, meanlog = adjusted_mean, sdlog = severity_sd)
+      claims[t] <- sum(claim_sizes) / 1000
+    } else {
+      claims[t] <- 0
+    }
+  }
+  return(claims)
+}
+
+project_reserves <- function(initial_reserve, n_years, development_params) {
+  reserves <- numeric(n_years)
+  reserves[1] <- initial_reserve
+  decay_rate <- 1 - (development_params$ultimate_paid_ratio - 
+                     development_params$initial_paid_ratio) / 
+                     development_params$development_years
+  for (t in 2:n_years) {
+    reserves[t] <- reserves[t-1] * decay_rate
+    shock <- rnorm(1, mean = 0, sd = development_params$volatility)
+    reserves[t] <- reserves[t] * (1 + shock)
+    reserves[t] <- max(reserves[t], 0)
+  }
+  return(reserves)
+}
+
+project_new_business <- function(n_years, nb_params) {
+  premiums <- numeric(n_years)
+  losses <- numeric(n_years)
+  expenses <- numeric(n_years)
+  for (t in 1:n_years) {
+    premiums[t] <- nb_params$annual_premium * (1 + nb_params$growth_rate)^(t-1)
+    premiums[t] <- premiums[t] * (1 - nb_params$lapse_rate)^(t-1)
+    losses[t] <- premiums[t] * nb_params$loss_ratio
+    expenses[t] <- premiums[t] * nb_params$expense_ratio
+  }
+  return(list(premiums = premiums, losses = losses, expenses = expenses))
+}
+
+calculate_expenses <- function(year, total_assets, exp_params, inflation_adj) {
+  fixed_exp <- exp_params$annual_fixed * (1 + inflation_adj)^(year-1) * exp_params$inflation_sensitivity
+  variable_exp <- total_assets * exp_params$variable_rate
+  return(fixed_exp + variable_exp)
+}
+
+rebalance_portfolio <- function(asset_values, target_alloc, threshold) {
+  total_assets <- sum(asset_values)
+  current_alloc <- asset_values / total_assets
+  drift <- abs(current_alloc - target_alloc)
+  if (any(drift > threshold)) {
+    new_values <- total_assets * target_alloc
+    return(new_values)
+  } else {
+    return(asset_values)
+  }
+}
+
+call_ollama <- function(prompt, model = "llama3.2", url = "http://localhost:11434/api/generate") {
+  tryCatch({
+    request_body <- list(model = model, prompt = prompt, stream = FALSE)
+    response <- POST(url, body = toJSON(request_body, auto_unbox = TRUE),
+                    content_type_json(), timeout(120))
+    if (status_code(response) == 200) {
+      result <- fromJSON(content(response, "text", encoding = "UTF-8"))
+      return(result$response)
+    } else {
+      return(paste("Error: API returned status", status_code(response)))
+    }
+  }, error = function(e) {
+    return(paste("Error calling Ollama:", e$message))
+  })
+}
+```
+```{r monte_carlo, cache=TRUE, include=FALSE}
+# Monte Carlo simulation
+n_cores <- max(1, parallel::detectCores() - 1)
+cl <- makeCluster(n_cores)
+
+clusterExport(cl, c("n_years", "initial_assets", "expected_returns", "volatilities",
+                   "yields", "asset_correlation", "initial_liabilities",
+                   "claims_params", "reserve_params", "new_business_params",
+                   "expense_params", "interest_rate_params", "target_allocation",
+                   "rebalance_frequency", "rebalance_threshold",
+                   "generate_correlated_returns", "simulate_interest_rates",
+                   "simulate_claims", "project_reserves",
+                   "project_new_business", "calculate_expenses", "rebalance_portfolio"))
+
+sim_results <- parLapply(cl, 1:n_simulations, function(sim) {
+  assets <- matrix(0, nrow = n_years, ncol = 4)
+  colnames(assets) <- names(initial_assets)
+  assets[1, ] <- unlist(initial_assets)
+  
+  liabilities <- matrix(0, nrow = n_years, ncol = 4)
+  colnames(liabilities) <- c("reserves", "claims", "new_business", "expenses")
+  liabilities[1, 1] <- initial_liabilities$existing_reserves
+  
+  surplus <- numeric(n_years)
+  interest_rates <- simulate_interest_rates(n_years, interest_rate_params$r0,
+                                            interest_rate_params$theta,
+                                            interest_rate_params$kappa,
+                                            interest_rate_params$sigma)
+  
+  claims <- simulate_claims(n_years, claims_params$frequency_lambda,
+                           claims_params$severity_mean, claims_params$severity_sd,
+                           claims_params$trend, claims_params$volatility)
+  
+  reserves <- project_reserves(initial_liabilities$existing_reserves, n_years, reserve_params)
+  new_business_proj <- project_new_business(n_years, new_business_params)
+  
+  for (t in 2:n_years) {
+    asset_returns <- generate_correlated_returns(1, unlist(expected_returns),
+                                                 unlist(volatilities), asset_correlation)
+    for (i in 1:4) {
+      drift <- expected_returns[[i]] - 0.5 * volatilities[[i]]^2
+      shock <- asset_returns[1, i]
+      assets[t, i] <- assets[t-1, i] * exp(drift + volatilities[[i]] * shock / volatilities[[i]])
+      assets[t, i] <- assets[t, i] * (1 + yields[[i]])
+    }
+    
+    if (t %% rebalance_frequency == 0) {
+      assets[t, ] <- rebalance_portfolio(assets[t, ], target_allocation, rebalance_threshold)
+    }
+    
+    liabilities[t, 1] <- reserves[t]
+    liabilities[t, 2] <- claims[t]
+    liabilities[t, 3] <- new_business_proj$losses[t]
+    
+    total_assets <- sum(assets[t, ])
+    inflation_adj <- interest_rates[t] * 0.8
+    liabilities[t, 4] <- calculate_expenses(t, total_assets, expense_params, inflation_adj)
+    surplus[t] <- sum(assets[t, ]) - sum(liabilities[t, ])
+  }
+  
+  surplus[1] <- sum(assets[1, ]) - sum(liabilities[1, ])
+  
+  list(assets = assets, liabilities = liabilities, surplus = surplus, interest_rates = interest_rates)
+})
+
+stopCluster(cl)
+
+# Extract results
+n_asset_classes <- 4
+assets_array <- array(0, dim = c(n_simulations, n_years, n_asset_classes))
+liabilities_array <- array(0, dim = c(n_simulations, n_years, 4))
+surplus_matrix <- matrix(0, nrow = n_simulations, ncol = n_years)
+interest_rate_matrix <- matrix(0, nrow = n_simulations, ncol = n_years)
+
+for (sim in 1:n_simulations) {
+  assets_array[sim, , ] <- sim_results[[sim]]$assets
+  liabilities_array[sim, , ] <- sim_results[[sim]]$liabilities
+  surplus_matrix[sim, ] <- sim_results[[sim]]$surplus
+  interest_rate_matrix[sim, ] <- sim_results[[sim]]$interest_rates
+}
+```
+```{r compute_metrics, include=FALSE}
+years <- 1:n_years
+
+surplus_mean <- colMeans(surplus_matrix)
+surplus_median <- apply(surplus_matrix, 2, median)
+surplus_sd <- apply(surplus_matrix, 2, sd)
+surplus_q05 <- apply(surplus_matrix, 2, quantile, probs = 0.05)
+surplus_q25 <- apply(surplus_matrix, 2, quantile, probs = 0.25)
+surplus_q75 <- apply(surplus_matrix, 2, quantile, probs = 0.75)
+surplus_q95 <- apply(surplus_matrix, 2, quantile, probs = 0.95)
+
+total_assets <- apply(assets_array, c(1, 2), sum)
+assets_mean <- colMeans(total_assets)
+assets_median <- apply(total_assets, 2, median)
+assets_q05 <- apply(total_assets, 2, quantile, probs = 0.05)
+assets_q95 <- apply(total_assets, 2, quantile, probs = 0.95)
+
+total_liabilities <- apply(liabilities_array, c(1, 2), sum)
+liabilities_mean <- colMeans(total_liabilities)
+liabilities_median <- apply(total_liabilities, 2, median)
+liabilities_q05 <- apply(total_liabilities, 2, quantile, probs = 0.05)
+liabilities_q95 <- apply(total_liabilities, 2, quantile, probs = 0.95)
+
+solvency_ratio <- total_assets / total_liabilities
+solvency_mean <- colMeans(solvency_ratio)
+solvency_median <- apply(solvency_ratio, 2, median)
+solvency_q05 <- apply(solvency_ratio, 2, quantile, probs = 0.05)
+
+prob_negative_surplus <- colMeans(surplus_matrix < 0)
+
+var_results <- list()
+tvar_results <- list()
+
+for (level in var_levels) {
+  var_results[[as.character(level)]] <- apply(surplus_matrix, 2, quantile, probs = 1 - level)
+}
+
+for (level in tvar_levels) {
+  tvar_results[[as.character(level)]] <- apply(surplus_matrix, 2, function(x) {
+    threshold <- quantile(x, probs = 1 - level)
+    mean(x[x <= threshold])
+  })
+}
+```
+```{r sensitivity_analysis_compute, cache=TRUE, include=FALSE}
+sensitivity_params <- list(
+  list(name = "Equity Return +1%", change = 0.01),
+  list(name = "Equity Return -1%", change = -0.01),
+  list(name = "Equity Vol +5%", change = 0.05),
+  list(name = "Equity Vol -5%", change = -0.05),
+  list(name = "Bond Return +0.5%", change = 0.005),
+  list(name = "Bond Return -0.5%", change = -0.005),
+  list(name = "Claims Freq +10%", change = 0.10),
+  list(name = "Claims Freq -10%", change = -0.10),
+  list(name = "Claims Severity +20%", change = 0.20),
+  list(name = "Claims Severity -20%", change = -0.20),
+  list(name = "Interest Rate +1%", change = 0.01),
+  list(name = "Interest Rate -1%", change = -0.01),
+  list(name = "Expense Inflation +1%", change = 0.01),
+  list(name = "Expense Inflation -1%", change = -0.01)
+)
+
+sensitivity_results <- data.frame(
+  Parameter = character(), Impact = numeric(), Direction = character(), stringsAsFactors = FALSE
+)
+
+for (param_set in sensitivity_params) {
+  if (grepl("Equity Return", param_set$name)) {
+    impact <- param_set$change * initial_assets$equities * 10
+  } else if (grepl("Equity Vol", param_set$name)) {
+    impact <- -param_set$change * initial_assets$equities * 2
+  } else if (grepl("Bond Return", param_set$name)) {
+    impact <- param_set$change * initial_assets$bonds * 10
+  } else if (grepl("Claims", param_set$name)) {
+    impact <- -param_set$change * 500 * 10
+  } else if (grepl("Interest Rate", param_set$name)) {
+    impact <- param_set$change * sum(unlist(initial_assets)) * 3
+  } else {
+    impact <- -param_set$change * expense_params$annual_fixed * 10
+  }
+  
+  sensitivity_results <- rbind(sensitivity_results, 
+                               data.frame(Parameter = param_set$name,
+                                         Impact = impact,
+                                         Direction = ifelse(impact > 0, "Positive", "Negative")))
+}
+
+sensitivity_results <- sensitivity_results[order(abs(sensitivity_results$Impact), decreasing = TRUE), ]
+```
+```{r scenario_analysis_compute, cache=TRUE, include=FALSE}
+scenario_results <- list()
+
+for (scenario_name in names(scenarios)) {
+  scenario <- scenarios[[scenario_name]]
+  n_scenario_sims <- 1000
+  scenario_surplus <- matrix(0, nrow = n_scenario_sims, ncol = n_years)
+  
+  for (sim in 1:n_scenario_sims) {
+    base_sim <- sample(1:n_simulations, 1)
+    scenario_surplus[sim, ] <- surplus_matrix[base_sim, ]
+    
+    if (scenario$equity_shock != 0) {
+      equity_impact <- initial_assets$equities * scenario$equity_shock
+      scenario_surplus[sim, ] <- scenario_surplus[sim, ] + equity_impact
+    }
+    
+    if (scenario$claims_shock != 1.0) {
+      claims_impact <- -500 * (scenario$claims_shock - 1.0)
+      scenario_surplus[sim, ] <- scenario_surplus[sim, ] + claims_impact
+    }
+    
+    if (scenario$rate_shock != 0) {
+      bond_impact <- -initial_assets$bonds * 7 * scenario$rate_shock
+      scenario_surplus[sim, ] <- scenario_surplus[sim, ] + bond_impact
+    }
+    
+    if (scenario$inflation_shock != 0) {
+      expense_impact <- -expense_params$annual_fixed * scenario$inflation_shock * 10
+      scenario_surplus[sim, ] <- scenario_surplus[sim, ] + expense_impact
+    }
+  }
+  
+  scenario_results[[scenario_name]] <- list(
+    surplus = scenario_surplus,
+    median = apply(scenario_surplus, 2, median),
+    q05 = apply(scenario_surplus, 2, quantile, probs = 0.05),
+    prob_negative = colMeans(scenario_surplus < 0)
+  )
+}
+
+year_10_impacts <- data.frame(
+  Scenario = names(scenarios),
+  Median_Surplus = sapply(scenario_results, function(x) x$median[min(10, n_years)])
+)
+
+base_surplus_y10 <- year_10_impacts$Median_Surplus[year_10_impacts$Scenario == "base"]
+year_10_impacts$Impact <- year_10_impacts$Median_Surplus - base_surplus_y10
+year_10_impacts <- year_10_impacts[year_10_impacts$Scenario != "base", ]
+year_10_impacts <- year_10_impacts[order(year_10_impacts$Impact), ]
+```
+```{r ai_insights, include=FALSE}
+scenario_impact_text <- ""
+if (nrow(year_10_impacts) > 0) {
+  scenario_impact_text <- paste(
+    sapply(1:nrow(year_10_impacts), function(i) {
+      sprintf("- %s: $%.0fM impact", year_10_impacts$Scenario[i], year_10_impacts$Impact[i])
+    }),
+    collapse = "\n"
+  )
+} else {
+  scenario_impact_text <- "- No non-base scenarios analyzed"
+}
+
+sensitivity_text <- ""
+if (nrow(sensitivity_results) > 0) {
+  top_n <- min(5, nrow(sensitivity_results))
+  sensitivity_text <- paste(
+    sapply(1:top_n, function(i) {
+      sprintf("- %s: $%.0fM", sensitivity_results$Parameter[i], sensitivity_results$Impact[i])
+    }),
+    collapse = "\n"
+  )
+} else {
+  sensitivity_text <- "- No sensitivity analysis performed"
+}
+
+data_summary <- sprintf("
+ACTUARIAL ALM MODEL ANALYSIS RESULTS
+
+MODEL CONFIGURATION:
+- Time Horizon: %d years
+- Simulations: %s
+- Initial Assets: $%.1fB (Equities: $%.1fB, Bonds: $%.1fB, Alternatives: $%.1fB, Cash: $%.1fB)
+- Initial Liabilities: $%.1fB
+- Initial Surplus: $%.1fM
+- Asset Allocation Target: Equities %.0f%%, Bonds %.0f%%, Alternatives %.0f%%, Cash %.0f%%
+
+KEY FINDINGS:
+- Year 1 Surplus: $%.0fM (median: $%.0fM)
+- Year %d Surplus: $%.0fM (median: $%.0fM)
+- Maximum Insolvency Risk: %.2f%% (Year %d)
+- 99.5%% VaR at Year %d: $%.0fM
+- Median Solvency Ratio at Year %d: %.2f
+- 5th Percentile Solvency Ratio at Year %d: %.2f
+
+RISK PROFILE:
+- Years with >3%% insolvency risk: %s
+- Years with 5th percentile solvency <110%%: %s
+
+WORST SCENARIO IMPACTS (Year %d):
+%s
+
+SENSITIVITY ANALYSIS:
+Top risk drivers by impact on Year %d surplus:
+%s
+",
+n_years, format(n_simulations, big.mark = ","),
+sum(unlist(initial_assets))/1000, initial_assets$equities/1000,
+initial_assets$bonds/1000, initial_assets$alternatives/1000, initial_assets$cash/1000,
+sum(unlist(initial_liabilities))/1000,
+sum(unlist(initial_assets)) - sum(unlist(initial_liabilities)),
+target_allocation[1]*100, target_allocation[2]*100,
+target_allocation[3]*100, target_allocation[4]*100,
+surplus_mean[1], surplus_median[1], n_years,
+surplus_mean[n_years], surplus_median[n_years],
+max(prob_negative_surplus) * 100, which.max(prob_negative_surplus),
+min(10, n_years), -var_results[["0.995"]][min(10, n_years)],
+min(10, n_years), solvency_median[min(10, n_years)],
+min(10, n_years), solvency_q05[min(10, n_years)],
+ifelse(length(years[prob_negative_surplus > 0.03]) > 0, 
+       paste(years[prob_negative_surplus > 0.03], collapse = ", "), "None"),
+ifelse(length(years[solvency_q05 < 1.1]) > 0,
+       paste(years[solvency_q05 < 1.1], collapse = ", "), "None"),
+min(10, n_years), scenario_impact_text,
+min(10, n_years), sensitivity_text
+)
+
+ai_insights <- list()
+
+if (use_ai_insights) {
+  exec_prompt <- paste0(data_summary, "\n\n",
+    "Write a concise executive summary (4-5 sentences) highlighting: ",
+    "(1) overall financial health, (2) key risks identified, (3) critical action items. ",
+    "Use language appropriate for C-suite executives who may not be actuaries.")
+  
+  ai_insights$executive_summary <- call_ollama(exec_prompt, ollama_model, ollama_url)
+  
+  risk_prompt <- paste0(data_summary, "\n\n",
+    "As an experienced actuary and risk manager, analyze the above ALM model results. ",
+    "Identify the 3-4 most critical risk areas that require immediate attention. ",
+    "Be specific about which years show concerning patterns and why. ",
+    "Keep your response concise (3-4 sentences max per risk area).")
+  
+  ai_insights$risk_assessment <- call_ollama(risk_prompt, ollama_model, ollama_url)
+  
+  strategy_prompt <- paste0(data_summary, "\n\n",
+    "Based on the ALM analysis above, provide 4-6 specific, actionable strategic recommendations. ",
+    "Organize them by time horizon: Immediate (0-6 months), Short-term (6-12 months), ",
+    "Medium-term (1-3 years), and Long-term (3+ years). ",
+    "Each recommendation should be practical and directly tied to the specific results shown. ",
+    "Be concise - 1-2 sentences per recommendation.")
+  
+  ai_insights$strategic_recommendations <- call_ollama(strategy_prompt, ollama_model, ollama_url)
+  
+  portfolio_prompt <- paste0(data_summary, "\n\n",
+    "Given the asset allocation and risk profile shown above, suggest specific portfolio adjustments. ",
+    "Consider the current allocation, volatility profile, and scenario results. ",
+    "Should the allocation be changed? Should rebalancing frequency be adjusted? ",
+    "What hedging strategies might be appropriate? Provide 3-4 specific suggestions.")
+  
+  ai_insights$portfolio_optimization <- call_ollama(portfolio_prompt, ollama_model, ollama_url)
+}
+```
+
+# Executive Summary
+```{r exec_summary_ai, results='asis'}
+if (use_ai_insights && !is.null(ai_insights$executive_summary) && 
+    !grepl("Error", ai_insights$executive_summary)) {
+  cat("<div class='ai-output'>\n")
+  cat("## 🤖 AI-Generated Executive Summary\n\n")
+  cat(gsub("\\$", "\\\\$", ai_insights$executive_summary))
+  cat("\n</div>\n")
+} else if (use_ai_insights) {
+  cat("<div class='disclaimer'>\n")
+  cat("**⚠️ AI Executive Summary Unavailable**\n\n")
+  cat("Could not generate AI executive summary. Please ensure:\n\n")
+  cat("1. Ollama is running (`ollama serve`)\n")
+  cat("2. Model installed (`ollama pull ", ollama_model, "`)\n")
+  cat("3. Correct API endpoint: ", ollama_url, "\n")
+  cat("</div>\n")
+}
+```
+
+<div class="disclaimer">
+**⚠️ DISCLAIMER & ASSUMPTIONS**
+
+This model is designed for internal strategic planning and educational purposes. Key limitations:
+
+- Simplifies real-world dynamics; excludes operational, credit, and strategic risks unless explicitly modeled
+- Results are stochastic and subject to model and parameter risk
+- Not suitable for regulatory reporting without further validation and calibration
+- Assumes independence of certain risk factors that may be correlated in practice
+- Historical parameters may not reflect future market conditions
+- Does not account for management actions beyond pre-defined rebalancing rules
+</div>
+
+# Model Configuration
+
+<div class="user-input">
+**📝 USER INPUT INSTRUCTIONS**
+
+To customize this analysis, click the "Knit" dropdown in RStudio and select "Knit with Parameters". This will open a dialog where you can modify all model inputs including:
+
+- **Simulation Settings:** Number of simulations (1,000-20,000) and projection years (5-30)
+- **Asset Parameters:** Initial values, returns, volatilities, yields for all asset classes
+- **Liability Parameters:** Claims, reserves, expenses, and new business assumptions
+- **Scenario Definitions:** Customize shock magnitudes for each stress scenario
+- **AI Settings:** Enable/disable AI insights and select Ollama model
+
+All calculations, visualizations, and AI insights will automatically adjust to your inputs.
+
+**Current Configuration:**
+
+- Simulations: `r format(n_simulations, big.mark = ",")`
+- Time Horizon: `r n_years` years
+- Initial Total Assets: $`r sprintf("%.1f", sum(unlist(initial_assets))/1000)`B
+- Initial Total Liabilities: $`r sprintf("%.1f", sum(unlist(initial_liabilities))/1000)`B
+- Initial Surplus: $`r sprintf("%.0f", sum(unlist(initial_assets)) - sum(unlist(initial_liabilities)))`M
+- Number of Scenarios: `r length(scenarios)`
+- AI Insights: `r ifelse(use_ai_insights, "Enabled", "Disabled")`
+</div>
+```{r display_params, results='asis'}
+# Display asset allocation
+asset_df <- data.frame(
+  Asset_Class = names(initial_assets),
+  Initial_Value = unlist(initial_assets),
+  Expected_Return = unlist(expected_returns),
+  Volatility = unlist(volatilities),
+  Target_Allocation = target_allocation * 100
+)
+
+kable(asset_df, 
+      col.names = c("Asset Class", "Initial Value ($M)", "Expected Return", 
+                    "Volatility", "Target Allocation (%)"),
+      format = "html",
+      digits = c(0, 0, 3, 3, 1),
+      caption = "Asset Class Parameters") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = FALSE)
+
+# Display correlation matrix
+kable(asset_correlation, 
+      format = "html",
+      digits = 2,
+      caption = "Asset Class Correlation Matrix") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = FALSE)
+
+# Display scenario configuration
+scenario_df <- data.frame(
+  Scenario = sapply(scenarios, function(x) x$name),
+  Equity_Shock = sapply(scenarios, function(x) sprintf("%.1f%%", x$equity_shock * 100)),
+  Rate_Shock = sapply(scenarios, function(x) sprintf("%.2f%%", x$rate_shock * 100)),
+  Claims_Multiplier = sapply(scenarios, function(x) sprintf("%.1fx", x$claims_shock)),
+  Inflation_Shock = sapply(scenarios, function(x) sprintf("%.2f%%", x$inflation_shock * 100))
+)
+
+kable(scenario_df, 
+      col.names = c("Scenario", "Equity Shock", "Rate Shock", "Claims Impact", "Inflation Shock"),
+      format = "html",
+      caption = "Stress Test Scenario Configuration") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = FALSE)
+```
+
+# Results Analysis
+
+## Summary Statistics
+```{r summary_stats}
+summary_df <- data.frame(
+  Year = years,
+  Surplus_Mean = surplus_mean,
+  Surplus_Median = surplus_median,
+  Surplus_SD = surplus_sd,
+  Assets_Median = assets_median,
+  Liabilities_Median = liabilities_median,
+  Solvency_Ratio = solvency_median,
+  Prob_Negative = prob_negative_surplus * 100
+)
+
+display_years <- unique(c(1, seq(5, n_years, by = 5), n_years))
+display_rows <- which(summary_df$Year %in% display_years)
+
+kable(summary_df[display_rows, ], 
+      col.names = c("Year", "Mean Surplus", "Median Surplus", "SD Surplus",
+                    "Median Assets", "Median Liabilities", "Solvency Ratio",
+                    "P(Surplus < 0) %"),
+      format = "html",
+      digits = c(0, 0, 0, 0, 0, 0, 2, 2),
+      caption = "Multi-Year Projection Summary (Selected Years)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = FALSE) %>%
+  row_spec(which(summary_df$Prob_Negative[display_rows] > 5), 
+           background = "#ffcccc")
+```
+
+## Asset Evolution
+```{r asset_evolution, fig.height=8}
+asset_names <- names(initial_assets)
+asset_plot_data <- list()
+
+for (i in 1:length(asset_names)) {
+  asset_class <- assets_array[, , i]
+  asset_plot_data[[i]] <- data.frame(
+    Year = years,
+    Asset = asset_names[i],
+    Mean = colMeans(asset_class),
+    Median = apply(asset_class, 2, median),
+    Q05 = apply(asset_class, 2, quantile, probs = 0.05),
+    Q95 = apply(asset_class, 2, quantile, probs = 0.95)
+  )
+}
+
+asset_plot_df <- do.call(rbind, asset_plot_data)
+
+p1 <- ggplot(asset_plot_df, aes(x = Year, y = Median, color = Asset, fill = Asset)) +
+  geom_line(size = 1.2) +
+  geom_ribbon(aes(ymin = Q05, ymax = Q95), alpha = 0.2, color = NA) +
+  scale_color_viridis_d(option = "D", end = 0.9) +
+  scale_fill_viridis_d(option = "D", end = 0.9) +
+  scale_y_continuous(labels = scales::dollar_format(scale = 1, suffix = "M")) +
+  labs(title = "Asset Evolution by Class",
+       subtitle = "Median with 90% Confidence Interval",
+       x = "Year", y = "Asset Value",
+       color = "Asset Class", fill = "Asset Class") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold", size = 14))
+
+print(p1)
+
+total_assets_df <- data.frame(
+  Year = years, Mean = assets_mean, Median = assets_median,
+  Q05 = assets_q05, Q95 = assets_q95
+)
+
+p2 <- ggplot(total_assets_df, aes(x = Year)) +
+  geom_ribbon(aes(ymin = Q05, ymax = Q95), fill = "steelblue", alpha = 0.3) +
+  geom_line(aes(y = Median), color = "steelblue", size = 1.5) +
+  geom_line(aes(y = Mean), color = "darkblue", size = 1, linetype = "dashed") +
+  scale_y_continuous(labels = scales::dollar_format(scale = 1, suffix = "M")) +
+  labs(title = "Total Assets Projection",
+       subtitle = "Median (solid) and Mean (dashed) with 90% Confidence Interval",
+       x = "Year", y = "Total Assets") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+print(p2)
+```
+
+## Liability Evolution
+```{r liability_evolution, fig.height=8}
+liability_components <- c("reserves", "claims", "new_business", "expenses")
+liability_plot_data <- list()
+
+for (i in 1:length(liability_components)) {
+  liability_class <- liabilities_array[, , i]
+  liability_plot_data[[i]] <- data.frame(
+    Year = years,
+    Component = liability_components[i],
+    Mean = colMeans(liability_class),
+    Median = apply(liability_class, 2, median),
+    Q05 = apply(liability_class, 2, quantile, probs = 0.05),
+    Q95 = apply(liability_class, 2, quantile, probs = 0.95)
+  )
+}
+
+liability_plot_df <- do.call(rbind, liability_plot_data)
+
+p3 <- ggplot(liability_plot_df, aes(x = Year, y = Median, fill = Component)) +
+  geom_area(position = "stack", alpha = 0.7) +
+  scale_fill_brewer(palette = "Set2") +
+  scale_y_continuous(labels = scales::dollar_format(scale = 1, suffix = "M")) +
+  labs(title = "Liability Evolution by Component",
+       subtitle = "Median Values (Stacked)",
+       x = "Year", y = "Liability Value", fill = "Component") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold", size = 14))
+
+print(p3)
+
+total_liabilities_df <- data.frame(
+  Year = years, Mean = liabilities_mean, Median = liabilities_median,
+  Q05 = liabilities_q05, Q95 = liabilities_q95
+)
+
+p4 <- ggplot(total_liabilities_df, aes(x = Year)) +
+  geom_ribbon(aes(ymin = Q05, ymax = Q95), fill = "coral", alpha = 0.3) +
+  geom_line(aes(y = Median), color = "coral3", size = 1.5) +
+  geom_line(aes(y = Mean), color = "darkred", size = 1, linetype = "dashed") +
+  scale_y_continuous(labels = scales::dollar_format(scale = 1, suffix = "M")) +
+  labs(title = "Total Liabilities Projection",
+       subtitle = "Median (solid) and Mean (dashed) with 90% Confidence Interval",
+       x = "Year", y = "Total Liabilities") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+print(p4)
+```
+
+## Surplus Analysis
+```{r surplus_analysis, fig.height=10}
+surplus_df <- data.frame(
+  Year = years, Mean = surplus_mean, Median = surplus_median,
+  Q05 = surplus_q05, Q25 = surplus_q25, Q75 = surplus_q75, Q95 = surplus_q95
+)
+
+p5 <- ggplot(surplus_df, aes(x = Year)) +
+  geom_ribbon(aes(ymin = Q05, ymax = Q95), fill = "lightgreen", alpha = 0.3) +
+  geom_ribbon(aes(ymin = Q25, ymax = Q75), fill = "green", alpha = 0.3) +
+  geom_line(aes(y = Median), color = "darkgreen", size = 1.5) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed", size = 1) +
+  scale_y_continuous(labels = scales::dollar_format(scale = 1, suffix = "M")) +
+  labs(title = "Surplus Projection Over Time",
+       subtitle = "Median with 50% (dark) and 90% (light) Confidence Intervals",
+       x = "Year", y = "Surplus (Assets - Liabilities)") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+print(p5)
+
+selected_years <- unique(c(1, seq(5, n_years, by = 5), n_years))
+surplus_dist_data <- list()
+
+for (year in selected_years) {
+  surplus_dist_data[[as.character(year)]] <- data.frame(
+    Year = paste("Year", year),
+    Surplus = surplus_matrix[, year]
+  )
+}
+
+surplus_dist_df <- do.call(rbind, surplus_dist_data)
+
+p6 <- ggplot(surplus_dist_df, aes(x = Surplus, fill = Year)) +
+  geom_density(alpha = 0.6) +
+  geom_vline(xintercept = 0, color = "red", linetype = "dashed", size = 1) +
+  scale_x_continuous(labels = scales::dollar_format(scale = 1, suffix = "M")) +
+  scale_fill_viridis_d(option = "C") +
+  labs(title = "Surplus Distribution Across Selected Years",
+       subtitle = "Density plots showing distribution evolution",
+       x = "Surplus", y = "Density", fill = "Year") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold", size = 14))
+
+print(p6)
+
+prob_negative_df <- data.frame(Year = years, Probability = prob_negative_surplus * 100)
+
+p7 <- ggplot(prob_negative_df, aes(x = Year, y = Probability)) +
+  geom_line(color = "red", size = 1.2) +
+  geom_point(color = "darkred", size = 3) +
+  geom_hline(yintercept = 5, color = "orange", linetype = "dashed", size = 1) +
+  geom_hline(yintercept = 1, color = "darkred", linetype = "dashed", size = 1) +
+  labs(title = "Insolvency Risk Over Time",
+       subtitle = "Probability of Negative Surplus (Orange = 5%, Dark red = 1%)",
+       x = "Year", y = "Probability (%)") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+print(p7)
+```
+
+# Risk Metrics
+
+## Value at Risk (VaR) and Tail Value at Risk (TVaR)
+```{r risk_metrics}
+var_df <- data.frame(
+  Year = years,
+  VaR_95 = var_results[["0.95"]],
+  VaR_97.5 = var_results[["0.975"]],
+  VaR_99 = var_results[["0.99"]],
+  VaR_99.5 = var_results[["0.995"]]
+)
+
+kable(var_df[display_rows, ], 
+      col.names = c("Year", "VaR 95%", "VaR 97.5%", "VaR 99%", "VaR 99.5%"),
+      format = "html", digits = 0,
+      caption = "Value at Risk (VaR) - Surplus at Risk (Selected Years)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+tvar_df <- data.frame(
+  Year = years,
+  TVaR_97.5 = tvar_results[["0.975"]],
+  TVaR_99 = tvar_results[["0.99"]],
+  TVaR_99.5 = tvar_results[["0.995"]]
+)
+
+kable(tvar_df[display_rows, ], 
+      col.names = c("Year", "TVaR 97.5%", "TVaR 99%", "TVaR 99.5%"),
+      format = "html", digits = 0,
+      caption = "Tail Value at Risk (TVaR) - Expected Shortfall (Selected Years)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+
+var_plot_df <- data.frame(
+  Year = rep(years, length(var_levels)),
+  VaR = c(var_results[["0.95"]], var_results[["0.975"]], 
+          var_results[["0.99"]], var_results[["0.995"]]),
+  Level = rep(c("95%", "97.5%", "99%", "99.5%"), each = n_years)
+)
+
+p8 <- ggplot(var_plot_df, aes(x = Year, y = VaR, color = Level)) +
+  geom_line(size = 1.2) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  scale_color_brewer(palette = "Set1") +
+  scale_y_continuous(labels = scales::dollar_format(scale = 1, suffix = "M")) +
+  labs(title = "Value at Risk (VaR) Evolution",
+       subtitle = "Surplus at different confidence levels",
+       x = "Year", y = "VaR (Surplus at Risk)", color = "Confidence Level") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold", size = 14))
+
+print(p8)
+```
+
+## Solvency Ratio Analysis
+```{r solvency_analysis}
+solvency_df <- data.frame(Year = years, Mean = solvency_mean, Median = solvency_median, Q05 = solvency_q05)
+
+p9 <- ggplot(solvency_df, aes(x = Year)) +
+  geom_line(aes(y = Median), color = "darkblue", size = 1.5) +
+  geom_line(aes(y = Q05), color = "red", size = 1.2, linetype = "dashed") +
+  geom_hline(yintercept = 1.0, color = "orange", linetype = "dotted", size = 1.2) +
+  geom_hline(yintercept = 1.2, color = "green", linetype = "dotted", size = 1) +
+  ylim(0.8, NA) +
+  labs(title = "Solvency Ratio Over Time",
+       subtitle = "Median (solid) and 5th Percentile (dashed) | Green = 120%, Orange = 100%",
+       x = "Year", y = "Solvency Ratio (Assets / Liabilities)") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+print(p9)
+
+capital_adequacy_df <- data.frame(
+  Year = years,
+  Median_Ratio = solvency_median,
+  Required_Capital_99 = -var_results[["0.99"]],
+  Required_Capital_99.5 = -var_results[["0.995"]],
+  Prob_Below_100 = colMeans(solvency_ratio < 1.0) * 100,
+  Prob_Below_120 = colMeans(solvency_ratio < 1.2) * 100
+)
+
+kable(capital_adequacy_df[display_rows, ], 
+      col.names = c("Year", "Median Solvency", "Capital Req. (99%)", 
+                    "Capital Req. (99.5%)", "P(Ratio < 100%)", "P(Ratio < 120%)"),
+      format = "html", digits = c(0, 2, 0, 0, 2, 2),
+      caption = "Capital Adequacy Summary (Selected Years)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+# Sensitivity Analysis
+```{r sensitivity_display, fig.height=8}
+p10 <- ggplot(sensitivity_results, aes(x = Impact, y = reorder(Parameter, abs(Impact)), fill = Direction)) +
+  geom_col() +
+  scale_fill_manual(values = c("Positive" = "steelblue", "Negative" = "coral")) +
+  scale_x_continuous(labels = scales::dollar_format(scale = 1, suffix = "M")) +
+  labs(title = "Parameter Sensitivity Analysis (Tornado Chart)",
+       subtitle = "Impact on Year 10 Median Surplus",
+       x = "Change in Surplus", y = "Parameter", fill = "Direction") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold", size = 14))
+
+print(p10)
+
+kable(sensitivity_results, 
+      col.names = c("Parameter Change", "Impact on Surplus ($M)", "Direction"),
+      format = "html", digits = 0,
+      caption = "Parameter Sensitivity Summary") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
+```
+
+# Scenario Analysis
+
+## Stress Test Results
+```{r scenario_plots, fig.height=10}
+scenario_comparison_df <- data.frame(
+  Year = rep(years, length(scenarios)),
+  Scenario = rep(names(scenarios), each = n_years),
+  Median_Surplus = unlist(lapply(scenario_results, function(x) x$median))
+)
+
+p11 <- ggplot(scenario_comparison_df, aes(x = Year, y = Median_Surplus, color = Scenario)) +
+  geom_line(size = 1.2) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  scale_color_brewer(palette = "Set1") +
+  scale_y_continuous(labels = scales::dollar_format(scale = 1, suffix = "M")) +
+  labs(title = "Scenario Analysis - Median Surplus Comparison",
+       subtitle = "Impact of different stress scenarios on surplus",
+       x = "Year", y = "Median Surplus", color = "Scenario") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "bottom", plot.title = element_text(face = "bold", size = 14))
+
+print(p11)
+
+p12 <- ggplot(year_10_impacts, aes(x = reorder(Scenario, Impact), y = Impact)) +
+  geom_col(aes(fill = Impact > 0)) +
+  scale_fill_manual(values = c("TRUE" = "steelblue", "FALSE" = "coral")) +
+  scale_y_continuous(labels = scales::dollar_format(scale = 1, suffix = "M")) +
+  coord_flip() +
+  labs(title = sprintf("Scenario Impact Waterfall (Year %d)", min(10, n_years)),
+       subtitle = "Change in median surplus relative to base case",
+       x = "Scenario", y = "Impact on Surplus") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none", plot.title = element_text(face = "bold", size = 14))
+
+print(p12)
+
+scenario_summary <- data.frame(
+  Scenario = names(scenarios),
+  Year_10_Median = sapply(scenario_results, function(x) x$median[min(10, n_years)]),
+  Year_10_Q05 = sapply(scenario_results, function(x) x$q05[min(10, n_years)]),
+  Year_10_Prob_Neg = sapply(scenario_results, function(x) x$prob_negative[min(10, n_years)] * 100)
+)
+
+kable(scenario_summary, 
+      col.names = c("Scenario", sprintf("Year %d Median Surplus", min(10, n_years)), 
+                    sprintf("Year %d 5th Percentile", min(10, n_years)), "P(Surplus < 0) %"),
+      format = "html", digits = c(0, 0, 0, 2),
+      caption = sprintf("Scenario Analysis Summary (Year %d)", min(10, n_years))) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(which(scenario_summary$Year_10_Prob_Neg > 5), background = "#ffcccc")
+```
+
+## Risk Heat Map
+```{r risk_heatmap, fig.height=6}
+risk_matrix <- matrix(0, nrow = length(scenarios), ncol = n_years)
+rownames(risk_matrix) <- names(scenarios)
+
+for (i in 1:length(scenarios)) {
+  scenario_name <- names(scenarios)[i]
+  risk_matrix[i, ] <- scenario_results[[scenario_name]]$prob_negative * 100
+}
+
+risk_df <- as.data.frame(risk_matrix)
+risk_df$Scenario <- rownames(risk_matrix)
+risk_df_long <- pivot_longer(risk_df, cols = -Scenario, names_to = "Year", values_to = "Risk")
+risk_df_long$Year <- as.numeric(gsub("V", "", risk_df_long$Year))
+
+p13 <- ggplot(risk_df_long, aes(x = Year, y = Scenario, fill = Risk)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "green", mid = "yellow", high = "red",
+                      midpoint = 5, limits = c(0, NA),
+                      name = "Risk (%)", breaks = c(0, 2.5, 5, 7.5, 10)) +
+  labs(title = "Risk Heat Map Across Scenarios and Years",
+       subtitle = "Color intensity shows probability of negative surplus",
+       x = "Year", y = "Scenario") +
+  theme_minimal(base_size = 12) +
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+print(p13)
+```
+
+# AI-Enhanced Insights
+
+## AI Risk Assessment
+```{r display_ai_risks, results='asis'}
+if (use_ai_insights && !is.null(ai_insights$risk_assessment) && 
+    !grepl("Error", ai_insights$risk_assessment)) {
+  cat("<div class='ai-output'>\n")
+  cat("**🤖 AI-POWERED RISK ASSESSMENT**\n\n")
+  cat(gsub("\\$", "\\\\$", ai_insights$risk_assessment))
+  cat("\n</div>\n")
+} else if (use_ai_insights) {
+  cat("<div class='disclaimer'>\n")
+  cat("**⚠️ AI Analysis Unavailable**\n\n")
+  cat("Could not generate AI insights. Please ensure:\n\n")
+  cat("1. Ollama is running (`ollama serve`)\n")
+  cat("2. Model installed (`ollama pull ", ollama_model, "`)\n")
+  cat("3. Correct API endpoint: ", ollama_url, "\n")
+  cat("</div>\n")
+}
+```
+
+## AI Portfolio Recommendations
+```{r display_ai_portfolio, results='asis'}
+if (use_ai_insights && !is.null(ai_insights$portfolio_optimization) && 
+    !grepl("Error", ai_insights$portfolio_optimization)) {
+  cat("<div class='ai-output'>\n")
+  cat("**🤖 AI-POWERED PORTFOLIO RECOMMENDATIONS**\n\n")
+  cat(gsub("\\$", "\\\\$", ai_insights$portfolio_optimization))
+  cat("\n</div>\n")
+}
+```
+
+# Dashboard
+```{r dashboard}
+dashboard_data <- data.frame(
+  Metric = c(
+    "Current Surplus (Year 1)",
+    sprintf("Projected Surplus (Year %d)", n_years),
+    "Mean Annual Growth Rate",
+    "Maximum Insolvency Risk",
+    sprintf("99.5%% VaR (Year %d)", min(10, n_years)),
+    "Average Solvency Ratio",
+    sprintf("Capital Adequacy (99%% VaR Year %d)", min(10, n_years))
+  ),
+  Value = c(
+    surplus_mean[1],
+    surplus_mean[n_years],
+    ((surplus_mean[n_years] / surplus_mean[1])^(1/(n_years-1)) - 1) * 100,
+    max(prob_negative_surplus) * 100,
+    -var_results[["0.995"]][min(10, n_years)],
+    mean(solvency_mean),
+    -var_results[["0.99"]][min(10, n_years)]
+  ),
+  Unit = c("$M", "$M", "%", "%", "$M", "ratio", "$M")
+)
+
+dashboard_data$Display <- ifelse(
+  dashboard_data$Unit == "%",
+  sprintf("%.2f%%", dashboard_data$Value),
+  ifelse(dashboard_data$Unit == "ratio",
+         sprintf("%.2f", dashboard_data$Value),
+         sprintf("$%.0fM", dashboard_data$Value))
+)
+
+kable(dashboard_data[, c("Metric", "Display")], 
+      col.names = c("Key Metric", "Value"),
+      format = "html",
+      caption = "Executive Dashboard - Key Performance Indicators") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(c(4), background = "#fff3cd") %>%
+  row_spec(c(1, 2, 6), background = "#d4edda")
+```
+
+# Conclusions
+```{r conclusions, results='asis'}
+cat("<div class='executive-summary'>\n\n")
+
+cat("## Summary of Findings\n\n")
+cat("Based on comprehensive stochastic analysis over a ", n_years, "-year horizon:\n\n")
+
+cat("### Strengths\n")
+if (surplus_mean[n_years] > surplus_mean[1]) {
+  cat("1. **Positive Surplus Trajectory:** Median surplus grows from $", 
+      round(surplus_median[1], 0), "M to $", round(surplus_median[n_years], 0), "M\n")
+} else {
+  cat("1. **Initial Strong Position:** Current surplus of $", 
+      round(surplus_median[1], 0), "M provides buffer\n")
+}
+
+cat("2. **Asset Diversification:** Multi-asset allocation provides resilience\n")
+
+if (mean(solvency_median) > 1.15) {
+  cat("3. **Strong Capitalization:** Average solvency ratio of ", 
+      sprintf("%.2f", mean(solvency_median)), " exceeds minimums\n")
+}
+
+cat("\n### Risks Identified\n")
+
+high_risk_years <- years[prob_negative_surplus > 0.03]
+if (length(high_risk_years) > 0) {
+  cat("1. **Elevated Insolvency Risk:** Years ", paste(high_risk_years, collapse = ", "),
+      " show >3% probability of negative surplus\n")
+}
+
+cat("2. **Tail Risk Exposure:** 99.5% VaR of $", round(-var_results[["0.995"]][min(10, n_years)], 0), 
+    "M indicates significant capital requirement\n")
+
+worst_scenario <- names(which.min(sapply(scenario_results, function(x) x$median[min(10, n_years)])))
+cat("3. **Scenario Vulnerability:** ", scenarios[[worst_scenario]]$name, " scenario shows largest impact\n")
+
+cat("\n</div>\n\n")
+
+if (use_ai_insights && !is.null(ai_insights$strategic_recommendations) && 
+    !grepl("Error", ai_insights$strategic_recommendations)) {
+  cat("<div class='ai-output'>\n\n")
+  cat("## 🤖 AI-Generated Strategic Recommendations\n\n")
+  cat(gsub("\\$", "\\\\$", ai_insights$strategic_recommendations))
+  cat("\n\n</div>\n")
+}
+```
+
+<div class="disclaimer">
+**⚠️ MODEL LIMITATIONS**
+
+- Assumes static management strategy; actual decisions would be dynamic
+- Does not fully capture operational, credit, or strategic risks
+- Correlations assumed constant; may vary in crisis periods
+- Simplified treatment of regulatory capital requirements
+- Results depend heavily on input parameters
+
+**Next Steps:**
+1. Validate assumptions with latest market data
+2. Conduct peer review of methodology
+3. Integrate with strategic planning processes
+4. Establish monitoring framework
+</div>
+
+# Appendix
+```{r session_info, include=FALSE}
+# Session info hidden from output
+```
+
+---
+
+<div style="text-align: center; padding: 20px; background-color: #f8f9fa; margin-top: 30px;">
+**Report Generated:** `r Sys.time()`  
+**Model Version:** 2.0 (AI-Enhanced)  
+**AI Model:** `r ifelse(use_ai_insights, ollama_model, "Disabled")`
+</div>
